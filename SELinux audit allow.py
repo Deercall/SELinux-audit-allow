@@ -11,12 +11,6 @@ def extract_field(error, keyword):
         return match.group(1).replace('u:r:', '').replace('u:object_r:', '').replace(':s0', '')
     return None
 
-def find_permissions(rule_list, all_config):
-    perms = re.search(f"{re.escape(all_config)} (.+)", rule_list)
-    if perms:
-        return perms.group(1)
-    return ""
-
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sepolicy_rule = os.path.join(script_dir, 'sepolicy.rule')
 sepolicy_cil = os.path.join(script_dir, 'sepolicy.cil')
@@ -29,7 +23,7 @@ print("修改者:酷安@猫羽今天吃什么")
 
 file = ""
 while not file:
-    input_file = input("- 请输入目标日志文件\n- (文件名+格式): ")
+    input_file = input("- 请输入目标日志文件\n- (点击屏幕输入): ")
     if input_file == "exit":
         exit()
 
@@ -43,20 +37,29 @@ while not file:
 print(f"\n- 目标日志文件: {file}")
 print(f"- 目标输出文件: {sepolicy_rule}, {sepolicy_cil}")
 
+rule_list = []
+unique_rules = set()
+
 for target in [sepolicy_rule, sepolicy_cil]:
     if os.path.isfile(target) and os.path.getsize(target) > 0:
         action = input(f"\n! 目标输出文件 {target} 已存在\n- 您希望继续写入此文件吗?\n- 输入 y 或 yes 将会继续写入此文件\n- 输入 n 或 no 将会清空此文件\n- 输入任意内容退出脚本: ")
         if action.lower() in ["y", "yes"]:
             print(f"- 继续写入 {target}")
             with open(target, 'r', encoding='utf-8') as f:
-                rule_list = re.sub(r"[{}()]", "", f.read()).replace('allow ', '')
+                for line in f:
+                    line = re.sub(r"[{}()]", "", line.strip()).replace('allow ', '')
+                    if line:
+                        rule_list.append(line)
+                        unique_rules.add(line)
         elif action.lower() in ["n", "no"]:
             print(f"- 清空 {target}")
-            open(target, 'w').close()
+            with open(target, 'w', encoding='utf-8') as f:
+                f.write('')
         else:
             exit(1)
     else:
-        open(target, 'w').close()
+        with open(target, 'w', encoding='utf-8') as f:
+            f.write('')
 
 print("\n- 处理")
 print("- 读取日志文件")
@@ -68,7 +71,9 @@ if not log:
     exit(1)
 
 print("- 开始生成规则")
-rule_list = ""
+
+excluded_classes = ["flags_health_check"]
+rule_entries = []
 
 for error in log:
     scontext = extract_field(error, "scontext")
@@ -78,55 +83,37 @@ for error in log:
     perms = perms.group(1).strip() if perms else ""
     all_config = f"{scontext} {tcontext} {tclass}"
 
-    rules += 1
-    print(f"\n- 此为第 {rules} 条规则")
+    if tclass in excluded_classes:
+        continue
 
     if not scontext or not tcontext or not tclass or not perms:
-        print("! 信息获取失败")
         continue
 
+    rule = f"{all_config} {perms}"
+
+    if rule in unique_rules:
+        continue
+
+    existing_entry = next((entry for entry in rule_entries if entry[0] == all_config), None)
+    if existing_entry:
+        existing_entry[1].extend(perms.split())
+        rule_entries.remove(existing_entry)
+    else:
+        rule_entries.append([all_config, perms.split()])
+
+    unique_rules.add(rule)
+    rules += 1
+
+    print(f"\n- 第 {rules} 条规则")
     print(f"- 信息: scontext={scontext}, tcontext={tcontext}, tclass={tclass}, perms={perms}")
 
-    if perms in find_permissions(rule_list, all_config):
-        print("! 检测到重复规则, 跳过")
-        continue
+print("- 写入规则到文件")
 
-    if all_config in rule_list:
-        existing_perms = find_permissions(rule_list, all_config)
-        perms = f"{existing_perms} {perms}"
-        rule_list = rule_list.replace(f"{all_config} {existing_perms}", "")
-
-        with open(sepolicy_rule, 'r', encoding='utf-8') as f:
-            content = f.read()
-        content = content.replace(f"allow {all_config} {existing_perms}", "")
-        with open(sepolicy_rule, 'w', encoding='utf-8') as f:
-            f.write(content)
-
-        with open(sepolicy_cil, 'r', encoding='utf-8') as f:
-            content = f.read()
-        content = content.replace(f"(allow {scontext} {tcontext} ({tclass} ({existing_perms})))", "")
-        with open(sepolicy_cil, 'w', encoding='utf-8') as f:
-            f.write(content)
-
-    print(f"- MagiskPolicy 规则: allow {scontext} {tcontext} {tclass} {{ {perms} }}")
-    print(f"- SEPolicy Cil 规则: (allow {scontext} {tcontext} ({tclass} (({perms}))))")
-
-    with open(sepolicy_rule, 'a', encoding='utf-8') as f:
-        f.write(f"allow {scontext} {tcontext} {tclass} {{ {perms} }}\n")
-
-    with open(sepolicy_cil, 'a', encoding='utf-8') as f:
-        f.write(f"(allow {scontext} {tcontext} ({tclass} (({perms}))))\n")
-
-    rule_list += f"{all_config} {perms}\n"
-
-def remove_empty_lines(file_path):
-    with open(file_path, 'r', encoding='utf-8') as f:
-        lines = [line for line in f.readlines() if line.strip()]
-    with open(file_path, 'w', encoding='utf-8') as f:
-        f.write("".join(lines))
-
-remove_empty_lines(sepolicy_rule)
-remove_empty_lines(sepolicy_cil)
+with open(sepolicy_rule, 'a', encoding='utf-8') as rule_file, open(sepolicy_cil, 'a', encoding='utf-8') as cil_file:
+    for all_config, perms in rule_entries:
+        perm_str = ' '.join(perms)
+        rule_file.write(f"allow {all_config} {{ {perm_str} }}\n")
+        cil_file.write(f"(allow {all_config.split()[0]} {all_config.split()[1]} ({all_config.split()[2]} (({perm_str}))))\n")
 
 print("\n- 规则生成完成\n")
 
